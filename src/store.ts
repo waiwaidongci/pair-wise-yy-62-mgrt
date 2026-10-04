@@ -1,5 +1,5 @@
 import { configureStore, createSlice, type PayloadAction } from '@reduxjs/toolkit';
-import { stowageApi, type Cargo, type CargoType } from './api';
+import { stowageApi, type Cargo, type CargoType, type OfflineRecord } from './api';
 
 export type StowageComment = {
   id: string;
@@ -8,6 +8,12 @@ export type StowageComment = {
   role: '船长' | '码头' | '货主';
   content: string;
   status: '待确认' | '已接受' | '已退回';
+};
+
+export type ReviewState = {
+  valid: boolean;
+  reviewedAt: string | null;
+  by: string | null;
 };
 
 type State = {
@@ -19,6 +25,11 @@ type State = {
   locked: boolean;
   viewMode: '3d' | 'section';
   draftSavedAt: string;
+  schemaVersion: number;
+  review: ReviewState;
+  network: 'online' | 'offline';
+  officer: string;
+  offlineQueue: OfflineRecord[];
 };
 
 const initialCargo: Cargo[] = [
@@ -32,6 +43,14 @@ const initialCargo: Cargo[] = [
 
 const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('yy62-stowage-plan') : null;
 const saved = raw ? JSON.parse(raw) : null;
+// 旧草稿缺少回路/复核/断网数据时升级成首版。
+if (saved && (typeof saved.schemaVersion !== 'number' || saved.schemaVersion < 1)) {
+  saved.schemaVersion = 1;
+  saved.review = saved.review ?? { valid: true, reviewedAt: null, by: null };
+  saved.network = saved.network ?? 'online';
+  saved.officer = saved.officer ?? '王值班';
+  saved.offlineQueue = saved.offlineQueue ?? [];
+}
 const initialState: State = saved ?? {
   cargo: initialCargo,
   activeCargoId: 'BL-88247',
@@ -44,7 +63,12 @@ const initialState: State = saved ?? {
   acceptedLimits: [],
   locked: false,
   viewMode: '3d',
-  draftSavedAt: '09:52'
+  draftSavedAt: '09:52',
+  schemaVersion: 1,
+  review: { valid: true, reviewedAt: '2026-10-02T09:52:00+08:00', by: '周船长' },
+  network: 'online',
+  officer: '王值班',
+  offlineQueue: []
 };
 
 const slice = createSlice({
@@ -57,6 +81,9 @@ const slice = createSlice({
       if (cargo) Object.assign(cargo, action.payload);
       state.planRevision += 1;
       state.draftSavedAt = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      // 货位变化：隔离与稳性结论立即失效，需重新复核。
+      state.review.valid = false;
+      state.review.reviewedAt = null;
     },
     updateLashing(state, action: PayloadAction<{ id: string; lashing: Cargo['lashing'] }>) {
       const cargo = state.cargo.find((item) => item.id === action.payload.id);
@@ -77,11 +104,51 @@ const slice = createSlice({
       if (!state.acceptedLimits.includes(action.payload)) state.acceptedLimits.push(action.payload);
     },
     setViewMode(state, action: PayloadAction<'3d' | 'section'>) { state.viewMode = action.payload; },
+    setNetwork(state, action: PayloadAction<'online' | 'offline'>) { state.network = action.payload; },
+    setOfficer(state, action: PayloadAction<string>) { state.officer = action.payload; },
+    queueOffline(state, action: PayloadAction<OfflineRecord>) { state.offlineQueue.push(action.payload); },
+    markOfflineUploaded(state, action: PayloadAction<string[]>) {
+      state.offlineQueue.forEach((r) => { if (action.payload.includes(r.id)) r.status = 'uploaded'; });
+    },
+    removeOffline(state, action: PayloadAction<string>) {
+      state.offlineQueue = state.offlineQueue.filter((r) => r.id !== action.payload);
+    },
+    clearUploadedOffline(state) {
+      state.offlineQueue = state.offlineQueue.filter((r) => r.status !== 'uploaded');
+    },
+    invalidateReview(state) {
+      state.review.valid = false;
+      state.review.reviewedAt = null;
+    },
+    reviewPassed(state, action: PayloadAction<{ by: string }>) {
+      state.review.valid = true;
+      state.review.reviewedAt = new Date().toISOString();
+      state.review.by = action.payload.by;
+    },
     lockPlan(state) { state.locked = true; state.planRevision += 1; }
+  },
+  extraReducers: (builder) => {
+    // 回路（插座）变化：隔离与稳性结论立即失效。
+    builder
+      .addMatcher(stowageApi.endpoints.claimSocket.matchFulfilled, (state, action) => {
+        if (action.payload.ok) { state.review.valid = false; state.review.reviewedAt = null; }
+      })
+      .addMatcher(stowageApi.endpoints.releaseSocket.matchFulfilled, (state) => {
+        state.review.valid = false;
+        state.review.reviewedAt = null;
+      })
+      .addMatcher(stowageApi.endpoints.syncOffline.matchFulfilled, (state) => {
+        state.review.valid = false;
+        state.review.reviewedAt = null;
+      });
   }
 });
 
-export const { selectCargo, moveCargo, updateLashing, addComment, acceptComment, rejectComment, acceptLimit, setViewMode, lockPlan } = slice.actions;
+export const {
+  selectCargo, moveCargo, updateLashing, addComment, acceptComment, rejectComment, acceptLimit,
+  setViewMode, setNetwork, setOfficer, queueOffline, markOfflineUploaded, removeOffline,
+  clearUploadedOffline, invalidateReview, reviewPassed, lockPlan
+} = slice.actions;
 
 export const store = configureStore({
   reducer: { stowage: slice.reducer, [stowageApi.reducerPath]: stowageApi.reducer },

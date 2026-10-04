@@ -32,6 +32,7 @@ import {
 import {
   IconAlertTriangle,
   IconAnchor,
+  IconBolt,
   IconBoxMultiple,
   IconCheck,
   IconCube,
@@ -41,6 +42,7 @@ import {
   IconLock,
   IconMap2,
   IconPlayerPlay,
+  IconPlug,
   IconPrinter,
   IconRefresh,
   IconRulerMeasure,
@@ -49,26 +51,56 @@ import {
   IconUsers
 } from '@tabler/icons-react';
 import * as THREE from 'three';
-import { useGetVoyageQuery, type Cargo, type CargoType } from './api';
+import {
+  useClaimSocketMutation,
+  useGetCircuitsQuery,
+  useGetVoyageQuery,
+  useReleaseSocketMutation,
+  useSyncOfflineMutation,
+  analyzeCircuits,
+  suggestAlternatives,
+  REEFER_POWER_KW,
+  type Cargo,
+  type CargoType,
+  type OfflineRecord,
+  type ReeferSocket,
+  type SyncResult
+} from './api';
 import {
   acceptComment,
   acceptLimit,
   addComment,
   calculateStability,
+  clearUploadedOffline,
   detectConflicts,
   lockPlan,
+  markOfflineUploaded,
   moveCargo,
+  queueOffline,
   rejectComment,
+  reviewPassed,
   selectCargo,
+  setNetwork,
+  setOfficer,
   setViewMode,
   store,
   updateLashing,
   type RootState
 } from './store';
 
+function fmtTime(iso?: string | null) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function uuid() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 const nav = [
   { path: '/', label: '航次总览', icon: <IconShip size={17} /> },
   { path: '/stowage', label: '配载与货位', icon: <IconLayoutBoardSplit size={17} /> },
+  { path: '/reefer', label: '冷藏箱与回路', icon: <IconPlug size={17} /> },
   { path: '/compare', label: '方案对比', icon: <IconHistory size={17} /> },
   { path: '/print', label: '配载图与清单', icon: <IconPrinter size={17} /> }
 ];
@@ -225,7 +257,7 @@ function Overview() {
   const conflicts = detectConflicts(state.cargo);
   const active = state.cargo.find((item) => item.id === state.activeCargoId) ?? state.cargo[0];
   return <div className="page">
-    <PageHeading eyebrow={`${data?.id ?? 'V-2609-17'} / 航次审阅`} title="多用途船舶配载校核" description={`${data?.vessel ?? '海岳轮'} · ${data?.route ?? '上海 → 釜山 → 温哥华'} · 计划离港 ${data?.departure ?? '10-02 14:00'}`} actions={<><Button variant="default" leftSection={<IconRefresh size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>{state.viewMode === '3d' ? '二维剖面' : '三维视角'}</Button><Button color="teal" leftSection={<IconLock size={16} />} disabled={conflicts.length > 0 || state.locked} onClick={() => dispatch(lockPlan())}>{state.locked ? '方案已锁定' : '锁定配载版本'}</Button></>} />
+    <PageHeading eyebrow={`${data?.id ?? 'V-2609-17'} / 航次审阅`} title="多用途船舶配载校核" description={`${data?.vessel ?? '海岳轮'} · ${data?.route ?? '上海 → 釜山 → 温哥华'} · 计划离港 ${data?.departure ?? '10-02 14:00'}`} actions={<><Button variant="default" leftSection={<IconRefresh size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>{state.viewMode === '3d' ? '二维剖面' : '三维视角'}</Button><Tooltip label={!state.review.valid ? '复核结论已失效，完成重新复核前不能锁定' : state.locked ? '方案已锁定' : '存在冲突，不能锁定'}><Button color="teal" leftSection={<IconLock size={16} />} disabled={conflicts.length > 0 || state.locked || !state.review.valid} onClick={() => dispatch(lockPlan())}>{state.locked ? '方案已锁定' : '锁定配载版本'}</Button></Tooltip></>} />
     {conflicts.length > 0 && <div className="warning-banner"><IconAlertTriangle size={18} /><strong>{conflicts.length} 项配载冲突待处理</strong><span>{conflicts.map((item) => item.title).join('、')}</span></div>}
     <SimpleGrid cols={{ base: 2, lg: 4 }} spacing="sm" mb="md">{[
       ['总货重', `${stability.total.toFixed(1)} t`, '设计上限 3560 t', 'ok'],
@@ -286,7 +318,7 @@ function Compare() {
       ['BL-88219', '绑扎', '待绑扎', '需复核', '危险品隔离边界调整'],
       ['BL-88240', 'Tier', 'Tier 1', 'Tier 2', '降低舱内底层局部载荷']
     ].map((row) => <Table.Tr key={row[0]}><Table.Td>{row[0]}</Table.Td><Table.Td>{row[1]}</Table.Td><Table.Td><Text c="red" td="line-through">{row[2]}</Text></Table.Td><Table.Td><Text c="teal" fw={700}>{row[3]}</Text></Table.Td><Table.Td><Text size="xs">{row[4]}</Text></Table.Td><Table.Td><Checkbox label="接受" defaultChecked /></Table.Td></Table.Tr>)}</Table.Tbody></Table></Card>
-    <Modal opened={acceptOpen} onClose={() => setAcceptOpen(false)} title="形成配载审阅结论" centered><Stack><Text size="sm" c="dimmed">接受后生成新的只读版本并保留船长、码头和货主意见。锁定前仍可退回修改。</Text>{['重大件绑扎后由甲板部复核', '危险品隔离线在配载图中明确标注', '釜山卸货顺序不得改变'].map((limit) => <Checkbox key={limit} label={limit} checked={state.acceptedLimits.includes(limit)} onChange={() => dispatch(acceptLimit(limit))} />)}<Button color="teal" disabled={state.acceptedLimits.length < 3} onClick={() => { dispatch(lockPlan()); setAcceptOpen(false); }}>接受并锁定 V{state.planRevision + 1}</Button></Stack></Modal>
+    <Modal opened={acceptOpen} onClose={() => setAcceptOpen(false)} title="形成配载审阅结论" centered><Stack><Text size="sm" c="dimmed">接受后生成新的只读版本并保留船长、码头和货主意见。锁定前仍可退回修改。</Text>{['重大件绑扎后由甲板部复核', '危险品隔离线在配载图中明确标注', '釜山卸货顺序不得改变'].map((limit) => <Checkbox key={limit} label={limit} checked={state.acceptedLimits.includes(limit)} onChange={() => dispatch(acceptLimit(limit))} />)}<Button color="teal" disabled={state.acceptedLimits.length < 3 || !state.review.valid} onClick={() => { dispatch(lockPlan()); setAcceptOpen(false); }}>接受并锁定 V{state.planRevision + 1}</Button></Stack></Modal>
   </div>;
 }
 
@@ -296,9 +328,10 @@ function PrintPlan() {
   const stability = calculateStability(state.cargo);
   const dispatch = useDispatch();
   return <div className="page print-page">
-    <PageHeading eyebrow="STOWAGE PLAN / PRINT" title="配载图与卸货清单" description="面向船长、码头和理货人员打印，包含重量分布和危险品标记。" actions={<><Button variant="default" leftSection={<IconPlayerPlay size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>预览剖面</Button><Button color="teal" leftSection={<IconPrinter size={16} />} onClick={() => window.print()}>打印配载包</Button></>} />
+    <PageHeading eyebrow="STOWAGE PLAN / PRINT" title="配载图与卸货清单" description="面向船长、码头和理货人员打印，包含重量分布和危险品标记。" actions={<><Button variant="default" leftSection={<IconPlayerPlay size={16} />} onClick={() => dispatch(setViewMode(state.viewMode === '3d' ? 'section' : '3d'))}>预览剖面</Button><Tooltip label={!state.review.valid ? '复核结论已失效，完成重新复核前不能打印' : '打印配载包'}><Button color="teal" leftSection={<IconPrinter size={16} />} disabled={!state.review.valid} onClick={() => window.print()}>打印配载包</Button></Tooltip></>} />
     <Card padding="xl" className="print-sheet">
-      <div className="print-header"><div><Text size="xs" c="dimmed">VESSEL STOWAGE PLAN</Text><h1>{data?.vessel ?? '海岳轮'} · {data?.id ?? 'V-2609-17'}</h1><p>{data?.route}</p></div><div className="print-stamp">方案 V{state.planRevision}<br />已校核</div></div>
+      {!state.review.valid && <div className="warning-banner"><IconAlertTriangle size={18} /><strong>复核结论已失效</strong><span>货位或回路发生变化，隔离与稳性结论尚未重新复核；完成复核前不能打印。请回到配载页重新复核。</span></div>}
+      <div className="print-header"><div><Text size="xs" c="dimmed">VESSEL STOWAGE PLAN</Text><h1>{data?.vessel ?? '海岳轮'} · {data?.id ?? 'V-2609-17'}</h1><p>{data?.route}</p></div><div className="print-stamp">方案 V{state.planRevision}<br />{state.review.valid ? '已校核' : '待复核'}</div></div>
       <div className="print-kpis"><div><span>总货重</span><strong>{stability.total.toFixed(1)} t</strong></div><div><span>稳性裕度</span><strong>{stability.stability.toFixed(1)}%</strong></div><div><span>纵倾</span><strong>{stability.trim}</strong></div><div><span>主甲板载荷</span><strong>{stability.deckLoad.toFixed(1)} t</strong></div></div>
       <h3>主甲板配载图</h3>
       <div className="print-deck">{Array.from({ length: 28 }).map((_, index) => { const row = index % 4; const bay = 4 + Math.floor(index / 4); const item = state.cargo.find((cargo) => cargo.deck === '主甲板' && cargo.bay === bay && cargo.row === row); return <div key={index} className={item ? 'filled' : ''} style={item ? { borderTopColor: item.color } : undefined}><span>{item ? item.bill.slice(-3) : ''}</span><small>{item ? `${item.weight}t` : `B${bay}/R${row}`}</small>{item?.hazmat !== '无' && item && <b>DG</b>}</div>; })}</div>
@@ -309,16 +342,194 @@ function PrintPlan() {
   </div>;
 }
 
+function ReviewBar() {
+  const dispatch = useDispatch();
+  const cargo = useSelector((root: RootState) => root.stowage.cargo);
+  const review = useSelector((root: RootState) => root.stowage.review);
+  const officer = useSelector((root: RootState) => root.stowage.officer);
+  const { data: circuits } = useGetCircuitsQuery();
+  const conflicts = detectConflicts(cargo);
+  const usage = analyzeCircuits(cargo, circuits ?? []);
+  const blocking = conflicts.some((c) => c.level === 'high') || usage.some((u) => u.overloaded);
+  const blockingReasons = [
+    ...conflicts.filter((c) => c.level === 'high').map((c) => c.title),
+    ...usage.filter((u) => u.overloaded).map((u) => `${u.circuit.name} 功率超载`)
+  ];
+  if (review.valid) {
+    return <div className="review-bar ok"><IconCheck size={16} /><strong>开航校核结论有效</strong><span>隔离与稳性结论已复核（{review.by ?? '—'} · {fmtTime(review.reviewedAt)}）。货位或回路一旦变化将立即失效。</span></div>;
+  }
+  return <div className="review-bar stale"><IconAlertTriangle size={16} /><strong>复核结论已失效</strong><span>货位或回路发生变化，隔离与稳性结论需重新复核；复核完成前不能锁定或打印。</span><Button size="compact-xs" color="teal" disabled={blocking} onClick={() => { if (!blocking) dispatch(reviewPassed({ by: officer })); }}>重新复核</Button>{blocking && <Text size="xs" c="red">仍有阻断项：{blockingReasons.join('、')}，复核不能通过。</Text>}</div>;
+}
+
+function ReeferPage() {
+  const state = useSelector((root: RootState) => root.stowage);
+  const cargo = useSelector((root: RootState) => root.stowage.cargo);
+  const dispatch = useDispatch();
+  const { data: circuits } = useGetCircuitsQuery();
+  const [claimSocket] = useClaimSocketMutation();
+  const [releaseSocket] = useReleaseSocketMutation();
+  const [syncOffline] = useSyncOfflineMutation();
+  const [toast, setToast] = useState<{ type: 'error' | 'success' | 'info'; text: string } | null>(null);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
+
+  const active = cargo.find((item) => item.id === state.activeCargoId) ?? cargo[0];
+  const isReefer = Boolean(active?.reefer);
+  const reeferOptions = cargo.filter((c) => c.reefer).map((c) => ({ value: c.id, label: `${c.bill} · ${c.id}` }));
+  const usage = useMemo(() => analyzeCircuits(cargo, circuits ?? []), [cargo, circuits]);
+  const alternatives = useMemo(() => suggestAlternatives(cargo, circuits ?? []), [cargo, circuits]);
+  const conflicts = detectConflicts(cargo);
+  const overloadCount = usage.filter((u) => u.overloaded).length;
+  const blocking = conflicts.some((c) => c.level === 'high') || overloadCount > 0;
+
+  const showToast = (type: 'error' | 'success' | 'info', text: string) => {
+    setToast({ type, text });
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 5200);
+  };
+
+  const claim = async (socketId: string, cargoId: string, officer: string, clientId?: string) => {
+    const res = await claimSocket({ socketId, cargoId, officer, clientId }).unwrap();
+    if (res.ok && res.duplicated) showToast('info', '重复提交：服务端已按幂等键去重，不再扣减功率。');
+    else if (res.ok) showToast('success', `已接入插座 ${res.socket.code}，由 ${officer} 确认占用。`);
+    else if (res.conflict) showToast('error', `接入冲突：该插座已被 ${res.conflict.officer ?? '其他值班员'} 于 ${fmtTime(res.conflict.at)} 确认。先确认者保持占用，后到者请改选其他插座。`);
+    else showToast('error', '接入失败：插座不存在。');
+    return res;
+  };
+
+  const handleAssign = (socket: ReeferSocket) => {
+    if (!isReefer || !active) { showToast('info', '请先在货物清单中选择一票冷藏箱，再接入插座。'); return; }
+    if (state.network === 'offline') {
+      dispatch(queueOffline({ id: uuid(), socketId: socket.id, cargoId: active.id, action: 'claim', officer: state.officer, at: new Date().toISOString(), status: 'pending' }));
+      showToast('info', '断网状态：已记入本地队列，回连后按插座合并上传。');
+      return;
+    }
+    void claim(socket.id, active.id, state.officer);
+  };
+
+  const handleRelease = (socket: ReeferSocket) => {
+    if (state.network === 'offline') {
+      dispatch(queueOffline({ id: uuid(), socketId: socket.id, cargoId: socket.occupiedBy ?? active?.id ?? '', action: 'release', officer: state.officer, at: new Date().toISOString(), status: 'pending' }));
+      showToast('info', '断网状态：释放已记入本地队列。');
+      return;
+    }
+    void releaseSocket({ socketId: socket.id }).then(() => showToast('success', `插座 ${socket.code} 已释放。`));
+  };
+
+  const handleSimultaneous = async (socket: ReeferSocket) => {
+    if (!isReefer || !active) { showToast('info', '请先选择一票冷藏箱。'); return; }
+    const other = '李值班';
+    const otherCargo = cargo.find((c) => c.reefer && c.id !== active.id) ?? active;
+    showToast('info', `已同时提交：${state.officer} 与 ${other} 争抢插座 ${socket.code}，以服务端先到确认为准。`);
+    const [r1, r2] = await Promise.all([
+      claimSocket({ socketId: socket.id, cargoId: active.id, officer: state.officer }).unwrap(),
+      claimSocket({ socketId: socket.id, cargoId: otherCargo.id, officer: other }).unwrap()
+    ]);
+    const r1Conflict = !r1.ok ? r1.conflict : undefined;
+    const r2Conflict = !r2.ok ? r2.conflict : undefined;
+    const winner = r1Conflict ? other : state.officer;
+    const loser = r1Conflict ? state.officer : other;
+    const loserConflict = r1Conflict ?? r2Conflict;
+    if (loserConflict) showToast('error', `${loser} 看到冲突：插座已由 ${winner} 先确认占用。先到者保持占用，请改选其他插座。`);
+    else showToast('success', `并发提交完成：${winner} 先确认占用插座。`);
+  };
+
+  const applyAlternative = (alt: { cargo: Cargo; fromSocket?: ReeferSocket }, socket: ReeferSocket) => {
+    if (alt.fromSocket) {
+      if (state.network === 'offline') dispatch(queueOffline({ id: uuid(), socketId: alt.fromSocket.id, cargoId: alt.cargo.id, action: 'release', officer: state.officer, at: new Date().toISOString(), status: 'pending' }));
+      else void releaseSocket({ socketId: alt.fromSocket.id });
+    }
+    dispatch(moveCargo({ id: alt.cargo.id, bay: socket.bay, row: socket.row, tier: socket.tier }));
+    if (state.network === 'offline') {
+      dispatch(queueOffline({ id: uuid(), socketId: socket.id, cargoId: alt.cargo.id, action: 'claim', officer: state.officer, at: new Date().toISOString(), status: 'pending' }));
+      showToast('info', '断网：替代货位与接入已记入本地队列。');
+      return;
+    }
+    void claim(socket.id, alt.cargo.id, state.officer);
+  };
+
+  const pending = state.offlineQueue.filter((r) => r.status === 'pending');
+  const uploaded = state.offlineQueue.filter((r) => r.status === 'uploaded');
+
+  const handleSync = async (records: OfflineRecord[], mode: 'upload' | 'redup') => {
+    if (!records.length) return;
+    const res = await syncOffline(records).unwrap();
+    setSyncResult(res);
+    if (mode === 'upload') dispatch(markOfflineUploaded(records.map((r) => r.id)));
+  };
+
+  return <div className="page">
+    <PageHeading eyebrow="REEFER & POWER / 开航校核" title="冷藏箱插座与供电回路" description="剩余功率按已分配箱数扣减；超载回路自动给出替代货位。" actions={<>
+      <Select size="xs" w={190} data={reeferOptions} value={active?.id} onChange={(v) => v && dispatch(selectCargo(v))} />
+      <Badge variant="light" color="gray">回路数据 首版 V1</Badge>
+      <Badge color={state.network === 'offline' ? 'orange' : 'teal'} leftSection={<IconBolt size={13} />}>{state.network === 'offline' ? '断网 · 本地队列' : '在线'}</Badge>
+      <Select size="xs" w={130} data={['王值班', '李值班', '张值班']} value={state.officer} onChange={(v) => v && dispatch(setOfficer(v))} />
+    </>} />
+    {toast && <div className={`toast-banner ${toast.type}`}><IconAlertTriangle size={16} /><span>{toast.text}</span></div>}
+    {overloadCount > 0 && <div className="warning-banner"><IconAlertTriangle size={18} /><strong>{overloadCount} 条回路功率超载</strong><span>剩余功率已按已分配箱数扣减，超载回路的冷藏箱请改接至下方替代货位；复核完成前不能锁定或打印。</span></div>}
+
+    <SimpleGrid cols={{ base: 1, lg: 3 }} spacing="sm">
+      {usage.map((u) => <Card key={u.circuit.id} padding="md">
+        <div className="panel-title"><div><strong>{u.circuit.name}</strong><Text size="xs" c="dimmed">回路 {u.circuit.id} · 容量 {u.circuit.capacityKw} kW（{u.capacityBoxes} 箱位）</Text></div><Badge color={u.overloaded ? 'red' : 'teal'}>{u.overloaded ? `超载 ${u.usedKw - u.circuit.capacityKw} kW` : `剩余 ${u.remainingKw} kW`}</Badge></div>
+        <Progress value={(u.usedKw / u.circuit.capacityKw) * 100} color={u.overloaded ? 'red' : 'teal'} size="lg" mt="md" />
+        <Group justify="space-between" mt={4}><Text size="xs" c="dimmed">已分配 {u.usedBoxes}/{u.capacityBoxes} 箱 · {u.usedKw}/{u.circuit.capacityKw} kW</Text><Text size="xs" c={u.remainingKw < 0 ? 'red' : 'teal'}>剩余功率 {u.remainingKw} kW</Text></Group>
+        <Stack gap={6} mt="sm">
+          {u.entries.map(({ socket, cargo: sc }) => <div key={socket.id} className={`socket-row ${socket.status}`}>
+            <div>
+              <Group gap={6}><Text size="xs" fw={700}>{socket.code}</Text><Badge size="xs" color="gray">{socket.deck} B{socket.bay}/R{socket.row}</Badge></Group>
+              {sc
+                ? <Text size="xs" c="dimmed">{sc.bill} · {sc.type} · {sc.powerKw ?? REEFER_POWER_KW} kW · {socket.officer} 确认于 {fmtTime(socket.confirmedAt)}</Text>
+                : <Text size="xs" c="dimmed">空闲 · 可接入冷藏箱</Text>}
+            </div>
+            {sc
+              ? <Button size="compact-xs" variant="default" onClick={() => handleRelease(socket)}>释放</Button>
+              : <Group gap={4}><Button size="compact-xs" color="teal" disabled={!isReefer} onClick={() => handleAssign(socket)}>接入 {active?.bill.slice(-3)}</Button><Button size="compact-xs" variant="subtle" color="gray" disabled={!isReefer} onClick={() => handleSimultaneous(socket)}>并发提交</Button></Group>}
+          </div>)}
+        </Stack>
+      </Card>)}
+    </SimpleGrid>
+
+    <Card padding="md" mt="md">
+      <div className="panel-title"><div><strong>替代货位建议</strong><Text size="xs" c="dimmed">超载或未接电的冷藏箱可移至仍有剩余功率的插座（同甲板、就近 Bay 优先）</Text></div></div>
+      {alternatives.length === 0 && <Text size="sm" c="teal" mt="md">所有冷藏箱均已在容量范围内接电，无需替代货位。</Text>}
+      <Stack gap="sm" mt="sm">
+        {alternatives.map((alt) => <div key={alt.cargo.id} className="alt-row">
+          <div><Text size="xs" fw={700}>{alt.cargo.bill} · {alt.cargo.id}</Text><Text size="xs" c="dimmed">当前 {alt.fromSocket ? `${alt.fromSocket.code}（${circuits?.find((c) => c.id === alt.fromSocket!.circuitId)?.name}）` : '未接电'} · {alt.cargo.deck} B{alt.cargo.bay}/R{alt.cargo.row}</Text></div>
+          <Stack gap={4} align="flex-end">
+            {alt.alternatives.length === 0 && <Text size="xs" c="red">无可用替代插座</Text>}
+            {alt.alternatives.map(({ socket, circuit, remainingAfter }) => <Button key={socket.id} size="compact-xs" variant="default" onClick={() => applyAlternative(alt, socket)}>移至 {circuit.name} {socket.code}（{socket.deck} B{socket.bay}/R{socket.row} · 余 {remainingAfter} kW）</Button>)}
+          </Stack>
+        </div>)}
+      </Stack>
+    </Card>
+
+    <Card padding="md" mt="md">
+      <div className="panel-title"><div><strong>断网记录与回连合并</strong><Text size="xs" c="dimmed">断网时操作先入本地队列，回连后按插座合并上传；幂等键去重，重复上传不重复扣减。</Text></div><Badge color={state.network === 'offline' ? 'orange' : 'teal'}>{state.network === 'offline' ? '断网中' : '在线'}</Badge></div>
+      <Group mt="sm">
+        <Button size="xs" variant="default" onClick={() => dispatch(setNetwork(state.network === 'offline' ? 'online' : 'offline'))}>{state.network === 'offline' ? '模拟回连' : '模拟断网'}</Button>
+        <Button size="xs" color="teal" disabled={state.network === 'offline' || pending.length === 0} onClick={() => handleSync(pending, 'upload')}>回连并合并上传（{pending.length}）</Button>
+        <Button size="xs" variant="default" disabled={uploaded.length === 0} onClick={() => handleSync(uploaded, 'redup')}>重复上传测试（{uploaded.length}）</Button>
+        <Button size="xs" variant="subtle" color="gray" disabled={uploaded.length === 0} onClick={() => dispatch(clearUploadedOffline())}>清除已上传</Button>
+      </Group>
+      {syncResult && <div className="sync-result"><Text size="xs">本次上传 <strong>{syncResult.uploaded}</strong> 条，按插座归并 <strong>{syncResult.merged}</strong> 个插座，冲突 <strong>{syncResult.conflicts}</strong> 条，幂等去重 <strong>{syncResult.duplicates}</strong> 条（不重复扣减功率）。</Text></div>}
+      <Stack gap={4} mt="sm">
+        {state.offlineQueue.length === 0 && <Text size="xs" c="dimmed">暂无断网记录。</Text>}
+        {state.offlineQueue.map((r) => <div key={r.id} className={`queue-row ${r.status}`}><Group gap={6}><Badge size="xs" color={r.status === 'pending' ? 'orange' : r.status === 'conflict' ? 'red' : 'teal'}>{r.status === 'pending' ? '待上传' : r.status === 'conflict' ? '冲突' : '已上传'}</Badge><Text size="xs">{r.action === 'claim' ? '接入' : '释放'} {r.socketId} · {r.cargoId} · {r.officer}</Text></Group><Text size="xs" c="dimmed">{fmtTime(r.at)}</Text></div>)}
+      </Stack>
+    </Card>
+  </div>;
+}
+
 function Shell({ children }: { children: ReactNode }) {
   const state = useSelector((root: RootState) => root.stowage);
   const stability = calculateStability(state.cargo);
   return <AppShell header={{ height: 62 }} navbar={{ width: 224, breakpoint: 'sm' }} padding={0}>
-    <AppShellHeader className="app-header"><Group h="100%" px="md" justify="space-between"><Group gap="sm"><ThemeIcon color="teal" variant="light"><IconShip size={19} /></ThemeIcon><div className="brand-copy"><strong>船舶配载校核台</strong><span>Stowage & Voyage Review</span></div></Group><Group gap="sm" visibleFrom="sm"><Badge variant="light" color="teal">海岳轮</Badge><Text size="xs" c="dimmed">V-2609-17 · 方案 V{state.planRevision}</Text><Badge color={state.locked ? 'teal' : 'orange'}>{state.locked ? '已锁定' : '审阅中'}</Badge></Group><ActionIcon variant="subtle" color="gray"><IconAnchor size={18} /></ActionIcon></Group></AppShellHeader>
+    <AppShellHeader className="app-header"><Group h="100%" px="md" justify="space-between"><Group gap="sm"><ThemeIcon color="teal" variant="light"><IconShip size={19} /></ThemeIcon><div className="brand-copy"><strong>船舶配载校核台</strong><span>Stowage & Voyage Review</span></div></Group><Group gap="sm" visibleFrom="sm"><Badge variant="light" color="teal">海岳轮</Badge><Text size="xs" c="dimmed">V-2609-17 · 方案 V{state.planRevision}</Text><Badge color={state.network === 'offline' ? 'orange' : 'gray'} variant="light">{state.network === 'offline' ? '断网' : '在线'}</Badge><Badge color={state.locked ? 'teal' : 'orange'}>{state.locked ? '已锁定' : '审阅中'}</Badge></Group><ActionIcon variant="subtle" color="gray"><IconAnchor size={18} /></ActionIcon></Group></AppShellHeader>
     <AppShellNavbar p="xs" className="app-nav"><div className="voyage-card"><Text size="xs" c="dimmed">当前航次</Text><Text fw={800}>上海 → 温哥华</Text><Text size="xs" c="dimmed">经停釜山 · 10-02 离港</Text><Progress value={stability.stability} color={stability.stability > 70 ? 'teal' : 'orange'} size="sm" mt="sm" /><Text size="xs" mt={4}>稳性裕度 {stability.stability.toFixed(1)}%</Text></div>{nav.map((item) => <NavLink end={item.path === '/'} key={item.path} to={item.path}>{item.icon}<span>{item.label}</span></NavLink>)}<div className="nav-foot"><IconRoute size={16} /><Text size="xs">基线：方案 V4<br />草稿：{state.draftSavedAt} 自动保存</Text></div></AppShellNavbar>
-    <AppShellMain>{children}</AppShellMain>
+    <AppShellMain><ReviewBar />{children}</AppShellMain>
   </AppShell>;
 }
 
 export default function App() {
-  return <BrowserRouter><Shell><Routes><Route path="/" element={<Overview />} /><Route path="/stowage" element={<Stowage />} /><Route path="/compare" element={<Compare />} /><Route path="/print" element={<PrintPlan />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></Shell></BrowserRouter>;
+  return <BrowserRouter><Shell><Routes><Route path="/" element={<Overview />} /><Route path="/stowage" element={<Stowage />} /><Route path="/reefer" element={<ReeferPage />} /><Route path="/compare" element={<Compare />} /><Route path="/print" element={<PrintPlan />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></Shell></BrowserRouter>;
 }

@@ -111,6 +111,22 @@ body { margin: 0; min-width: 320px; background: #eef2f0; }
 .print-deck b { position: absolute; right: 5px; bottom: 5px; background: #c26b2a; color: white; border-radius: 3px; font-size: 8px; padding: 2px 4px; }
 .print-signatures { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 35px; padding-top: 17px; border-top: 1px solid var(--line); font-size: 11px; }
 
+.review-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; border-radius: 6px; padding: 10px 13px; margin-bottom: 14px; font-size: 12px; }
+.review-bar.ok { background: #e6f4ef; border: 1px solid #bfe0d5; color: #176858; }
+.review-bar.stale { background: #fff7e7; border: 1px solid #ebcf9f; color: #8e5617; }
+.review-bar span { color: inherit; opacity: .85; }
+.review-bar .mantine-Button-root { margin-left: auto; }
+.toast-banner { display: flex; align-items: center; gap: 9px; border-radius: 6px; padding: 10px 13px; margin-bottom: 12px; font-size: 12px; border: 1px solid; }
+.toast-banner.error { background: #fdeceb; border-color: #ecc4c1; color: #a03632; }
+.toast-banner.success { background: #e6f4ef; border-color: #bfe0d5; color: #176858; }
+.toast-banner.info { background: #eef3f6; border-color: #cddde4; color: #3a6474; }
+.socket-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fafcfb; }
+.socket-row.occupied { background: #f3f7f6; }
+.alt-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 5px; background: #fafcfb; }
+.queue-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fafcfb; }
+.queue-row.uploaded { opacity: .72; }
+.sync-result { margin-top: 10px; padding: 9px 11px; background: #e6f4ef; border: 1px solid #bfe0d5; border-radius: 5px; color: #176858; }
+
 @media (max-width: 1200px) {
   .stowage-grid { grid-template-columns: 260px minmax(460px, 1fr); }
   .stowage-grid > :last-child { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
